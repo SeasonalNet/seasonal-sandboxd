@@ -7,7 +7,16 @@ RUN npm run build
 
 FROM node:24-bookworm-slim
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends sqlite3 \
+  && apt-get install -y --no-install-recommends \
+    sqlite3 \
+    coreutils \
+    diffutils \
+    file \
+    findutils \
+    grep \
+    jq \
+    ripgrep \
+    sed \
   && rm -rf /var/lib/apt/lists/* \
   && useradd --system --home /var/lib/sandboxd --shell /usr/sbin/nologin sandboxd \
   && install -d -o sandboxd -g sandboxd -m 0750 /var/lib/sandboxd

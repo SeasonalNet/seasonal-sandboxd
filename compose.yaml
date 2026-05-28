@@ -1,0 +1,45 @@
+# /opt/seasonal-sandboxd/compose.yaml
+services:
+  seasonal-sandboxd:
+    build: .
+    image: seasonal-sandboxd:local
+    container_name: seasonal-sandboxd
+    restart: unless-stopped
+    read_only: true
+
+    user: "${SANDBOXD_UID}:${SANDBOXD_GID}"
+
+    ports:
+      - "127.0.0.1:9090:9090"
+
+    networks:
+      - sandboxd-internal
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    pids_limit: 128
+    mem_limit: 256m
+
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+    environment:
+      NODE_ENV: production
+      SEASONAL_SANDBOXD_CONFIG: /etc/seasonal-sandboxd/config.yaml
+      SQLITE3_BIN: /usr/bin/sqlite3
+      PATH: /opt/seasonal-sandboxd/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+      HOME: /var/lib/sandboxd
+
+    volumes:
+      - /etc/seasonal-sandboxd/config.docker.yaml:/etc/seasonal-sandboxd/config.yaml:ro
+      - /var/lib/sandboxd:/var/lib/sandboxd:rw
+      - /mnt/seasonalnas/agent-workspaces/seasonal-sandboxd:/mnt/seasonalnas/agent-workspaces/seasonal-sandboxd:rw
+      - /mnt/seasonalnas/artifacts/seasonal-sandboxd:/mnt/seasonalnas/artifacts/seasonal-sandboxd:rw
+
+networks:
+  sandboxd-internal:
+    driver: bridge
