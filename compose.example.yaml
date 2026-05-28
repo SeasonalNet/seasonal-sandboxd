@@ -1,0 +1,25 @@
+services:
+  seasonal-sandboxd:
+    build: .
+    container_name: seasonal-sandboxd
+    restart: unless-stopped
+    read_only: true
+    networks:
+      - sandboxd-internal
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    volumes:
+      - /etc/seasonal-sandboxd/config.yaml:/etc/seasonal-sandboxd/config.yaml:ro
+      - /var/lib/sandboxd:/var/lib/sandboxd:rw
+      - /mnt/seasonalnas/agent-workspaces/seasonal-sandboxd:/mnt/seasonalnas/agent-workspaces/seasonal-sandboxd:rw
+      - /mnt/seasonalnas/artifacts/seasonal-sandboxd:/mnt/seasonalnas/artifacts/seasonal-sandboxd:rw
+
+networks:
+  sandboxd-internal:
+    internal: true

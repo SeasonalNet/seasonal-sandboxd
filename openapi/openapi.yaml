@@ -1,0 +1,302 @@
+openapi: 3.1.0
+info:
+  title: seasonal-sandboxd API
+  version: 0.1.0
+  summary: SeasonalNet controlled execution daemon API.
+  description: >-
+    REST API for job-scoped scratch workspaces, structured command pipelines,
+    and artifact metadata. Errors use RFC 9457 Problem Details.
+servers:
+  - url: http://127.0.0.1:9090
+security: []
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      summary: Process liveness check.
+      responses:
+        '200':
+          description: The daemon process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, service]
+                properties:
+                  ok: { type: boolean }
+                  service: { type: string }
+  /readyz:
+    get:
+      operationId: getReadyz
+      summary: Database and storage readiness check.
+      responses:
+        '200':
+          description: The daemon is ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+        '503':
+          $ref: '#/components/responses/Problem'
+  /openapi.json:
+    get:
+      operationId: getOpenApiJson
+      summary: Return the OpenAPI contract as JSON.
+      responses:
+        '200':
+          description: OpenAPI contract.
+          content:
+            application/json:
+              schema:
+                type: object
+  /v1/jobs:
+    post:
+      operationId: createJob
+      summary: Create a sandbox job.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateJobRequest'
+      responses:
+        '201':
+          description: Job created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '400':
+          $ref: '#/components/responses/Problem'
+    get:
+      operationId: listJobs
+      summary: List recent jobs.
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Recent jobs.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Job'
+  /v1/jobs/{jobId}:
+    get:
+      operationId: getJob
+      summary: Get one job.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '404':
+          $ref: '#/components/responses/Problem'
+  /v1/jobs/{jobId}/pipelines:
+    post:
+      operationId: runPipeline
+      summary: Run a structured command pipeline for a job.
+      description: Stages are argv arrays. The daemon must not invoke a shell to interpret the pipeline.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunPipelineRequest'
+      responses:
+        '200':
+          description: Pipeline completed or failed with captured output.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PipelineRun'
+        '400':
+          $ref: '#/components/responses/Problem'
+        '403':
+          $ref: '#/components/responses/Problem'
+        '404':
+          $ref: '#/components/responses/Problem'
+  /v1/jobs/{jobId}/processes:
+    get:
+      operationId: listJobProcesses
+      summary: List daemon-managed processes for one job.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Sandbox-local process list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobId, items]
+                properties:
+                  jobId: { type: string }
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ProcessInfo'
+  /v1/jobs/{jobId}/cancel:
+    post:
+      operationId: cancelJob
+      summary: Request cancellation for daemon-managed work in one job.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Cancellation requested.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobId, status]
+                properties:
+                  jobId: { type: string }
+                  status: { type: string }
+  /v1/jobs/{jobId}/artifacts:
+    get:
+      operationId: listArtifacts
+      summary: List artifact files for one job.
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Artifact list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobId, artifactPath, items]
+                properties:
+                  jobId: { type: string }
+                  artifactPath: { type: string }
+                  items:
+                    type: array
+                    items: { type: string }
+components:
+  parameters:
+    JobId:
+      in: path
+      name: jobId
+      required: true
+      schema:
+        type: string
+        pattern: '^sandboxd_[0-9a-fA-F-]+$'
+  responses:
+    Problem:
+      description: Problem Details error response.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+  schemas:
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details object.
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+      additionalProperties: true
+    Readiness:
+      type: object
+      required: [ok, dbReady, workspaceReady, artifactReady]
+      properties:
+        ok: { type: boolean }
+        dbReady: { type: boolean }
+        workspaceReady: { type: boolean }
+        artifactReady: { type: boolean }
+    CreateJobRequest:
+      type: object
+      properties:
+        caller:
+          type: string
+          default: unknown
+        profile:
+          type: string
+          default: inspect
+        metadata:
+          type: object
+          additionalProperties: true
+    Job:
+      type: object
+      required: [jobId, caller, profile, status, network, createdAt, updatedAt, workspacePath, artifactPath, metadata]
+      properties:
+        jobId: { type: string }
+        caller: { type: string }
+        profile: { type: string }
+        status: { type: string }
+        network: { type: string, enum: [disabled] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        completedAt: { type: [string, 'null'], format: date-time }
+        workspacePath: { type: string }
+        artifactPath: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+    RunPipelineRequest:
+      type: object
+      required: [pipeline]
+      properties:
+        pipeline:
+          type: array
+          minItems: 1
+          maxItems: 8
+          items:
+            type: array
+            minItems: 1
+            items:
+              type: string
+        cwd:
+          type: string
+          description: Relative path inside the job work directory.
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+        maxOutputBytes:
+          type: integer
+          minimum: 1024
+    PipelineRun:
+      type: object
+      required: [runId, jobId, status, exitCode, durationMs, cwd, stdout, stderr, truncated]
+      properties:
+        runId: { type: string }
+        jobId: { type: string }
+        status: { type: string, enum: [completed, failed, timeout] }
+        exitCode: { type: [integer, 'null'] }
+        signal: { type: [string, 'null'] }
+        durationMs: { type: integer }
+        cwd: { type: string }
+        stdout: { type: string }
+        stderr: { type: string }
+        truncated: { type: boolean }
+    ProcessInfo:
+      type: object
+      required: [pid, state, command]
+      properties:
+        pid: { type: integer }
+        ppid: { type: integer }
+        state: { type: string }
+        elapsed: { type: string }
+        command: { type: string }

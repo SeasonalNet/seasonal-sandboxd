@@ -1,0 +1,64 @@
+server:
+  host: 127.0.0.1
+  port: 9090
+  trustProxy: false
+
+database:
+  path: /var/lib/sandboxd/sandboxd.db
+
+storage:
+  workspaceRoot: /mnt/seasonalnas/agent-workspaces/seasonal-sandboxd
+  artifactRoot: /mnt/seasonalnas/artifacts/seasonal-sandboxd
+  monthFormat: numeric-name
+
+execution:
+  defaultTimeoutSeconds: 10
+  maxTimeoutSeconds: 60
+  maxOutputBytes: 65536
+  defaultProfile: inspect
+  profiles:
+    inspect:
+      description: Safe read-only inspection profile.
+      allowWriteArtifacts: true
+      allowedCommands:
+        - cat
+        - diff
+        - file
+        - find
+        - grep
+        - head
+        - jq
+        - ls
+        - pwd
+        - rg
+        - sed
+        - sort
+        - tail
+        - wc
+    test:
+      description: Disposable test execution profile. Still no network by deployment policy.
+      allowWriteArtifacts: true
+      allowedCommands:
+        - cat
+        - diff
+        - file
+        - find
+        - grep
+        - head
+        - jq
+        - ls
+        - npm
+        - python
+        - python3
+        - pytest
+        - pwd
+        - rg
+        - sed
+        - sort
+        - tail
+        - tsc
+        - wc
+
+auth:
+  enabled: false
+  bearerTokens: []
