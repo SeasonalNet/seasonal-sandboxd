@@ -1,7 +1,61 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { nowIso } from './time.js';
+export { nowIso } from './time.js';
+
+interface RunResult {
+  changes: number;
+  lastInsertRowid: number | bigint;
+}
+
+interface StatementAdapter {
+  run(...params: unknown[]): RunResult;
+  get(...params: unknown[]): unknown;
+  all(...params: unknown[]): unknown[];
+}
+
+interface DatabaseAdapter {
+  exec(sql: string): void;
+  prepare(sql: string): StatementAdapter;
+  transaction<T extends unknown[], R>(fn: (...args: T) => R): (...args: T) => R;
+  pragma(sql: string): void;
+  close(): void;
+}
+
+type BetterSqlite3DatabaseConstructor = new (filename: string) => DatabaseAdapter;
+
+const require = createRequire(import.meta.url);
+
+function openSqliteDatabase(dbPath: string): DatabaseAdapter {
+  try {
+    const betterSqlite3 = require('better-sqlite3') as BetterSqlite3DatabaseConstructor;
+    return new betterSqlite3(dbPath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes('better-sqlite3') && !message.includes('bindings file') && !message.includes('Cannot find module')) throw error;
+  }
+
+  const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: new (filename: string) => DatabaseAdapter };
+  const db = new DatabaseSync(dbPath);
+  return {
+    exec: (sql: string) => db.exec(sql),
+    prepare: (sql: string) => db.prepare(sql),
+    transaction: <T extends unknown[], R>(fn: (...args: T) => R) => (...args: T): R => {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const result = fn(...args);
+        db.exec('COMMIT');
+        return result;
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    },
+    pragma: (sql: string) => db.exec(`PRAGMA ${sql}`),
+    close: () => db.close(),
+  };
+}
 
 export interface JobRecord {
   job_id: string;
@@ -32,18 +86,6 @@ export interface PipelineRunRecord {
   stderr: string;
   truncated: number;
   error_json: string | null;
-}
-
-type SqlValue = string | number | boolean | null;
-
-function sqlLiteral(value: SqlValue): string {
-  if (value === null) return 'NULL';
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new Error('non-finite number cannot be stored in sqlite');
-    return String(value);
-  }
-  if (typeof value === 'boolean') return value ? '1' : '0';
-  return `'${value.replaceAll("'", "''")}'`;
 }
 
 function maybeNumber(value: unknown): number | null {
@@ -87,107 +129,127 @@ function pipelineRecord(row: Record<string, unknown>): PipelineRunRecord {
   };
 }
 
+function migrationVersion(filename: string): string {
+  return path.basename(filename, '.sql');
+}
+
+export function futureIso(seconds: number): string {
+  return new Date(Date.now() + seconds * 1000).toISOString();
+}
+
+export function parseJsonArray(value: string | null | undefined): string[] {
+  if (!value) return [];
+  const parsed = JSON.parse(value) as unknown;
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((item): item is string => typeof item === 'string');
+}
+
 export class SandboxDatabase {
   readonly dbPath: string;
-  readonly sqliteBin: string;
+  readonly raw: DatabaseAdapter;
 
-  constructor(dbPath: string, sqliteBin = process.env.SQLITE3_BIN ?? '/usr/bin/sqlite3') {
-    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  constructor(dbPath: string, raw?: DatabaseAdapter) {
+    if (dbPath !== ':memory:') fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.dbPath = dbPath;
-    this.sqliteBin = sqliteBin;
-  }
-
-  private exec(sql: string): void {
-    execFileSync(this.sqliteBin, ['-batch', this.dbPath], {
-      input: `PRAGMA foreign_keys = ON;\n${sql}\n`,
-      encoding: 'utf8',
-      maxBuffer: 1024 * 1024 * 8,
-    });
-  }
-
-  private query<T>(sql: string): T[] {
-    const output = execFileSync(this.sqliteBin, ['-json', this.dbPath], {
-      input: `PRAGMA foreign_keys = ON;\n${sql}\n`,
-      encoding: 'utf8',
-      maxBuffer: 1024 * 1024 * 16,
-    }).trim();
-    if (!output) return [];
-    return JSON.parse(output) as T[];
+    this.raw = raw ?? openSqliteDatabase(dbPath);
+    this.raw.pragma('journal_mode = WAL');
+    this.raw.pragma('foreign_keys = ON');
+    this.raw.pragma('busy_timeout = 5000');
   }
 
   initialize(): void {
-    const migrationPath = path.resolve(process.cwd(), 'migrations/001_initial.sql');
-    const sql = fs.readFileSync(migrationPath, 'utf8');
-    this.exec(`PRAGMA journal_mode = WAL;\n${sql}`);
-    this.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (${sqlLiteral('001_initial')}, ${sqlLiteral(nowIso())});`);
+    const migrationsDir = path.resolve(process.cwd(), 'migrations');
+    const files = fs.readdirSync(migrationsDir).filter((file) => file.endsWith('.sql')).sort();
+
+    this.raw.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+    `);
+
+    const applyMigration = this.raw.transaction((version: string, sql: string) => {
+      const existing = this.raw.prepare('SELECT version FROM schema_migrations WHERE version = ?').get(version);
+      if (existing) return;
+      this.raw.exec(sql);
+      this.raw.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(version, nowIso());
+    });
+
+    for (const file of files) applyMigration(migrationVersion(file), fs.readFileSync(path.join(migrationsDir, file), 'utf8'));
+  }
+
+  close(): void {
+    this.raw.close();
   }
 
   ready(): boolean {
-    const rows = this.query<{ ok: number }>('SELECT 1 AS ok;');
-    return rows[0]?.ok === 1;
+    const row = this.raw.prepare('SELECT 1 AS ok').get() as { ok: number } | undefined;
+    return row?.ok === 1;
   }
 
   insertJob(job: JobRecord): void {
-    this.exec(`
+    this.raw.prepare(`
       INSERT INTO jobs(job_id, caller, profile, status, network, created_at, updated_at, completed_at, workspace_path, artifact_path, metadata_json)
-      VALUES (
-        ${sqlLiteral(job.job_id)},
-        ${sqlLiteral(job.caller)},
-        ${sqlLiteral(job.profile)},
-        ${sqlLiteral(job.status)},
-        ${sqlLiteral(job.network)},
-        ${sqlLiteral(job.created_at)},
-        ${sqlLiteral(job.updated_at)},
-        ${sqlLiteral(job.completed_at)},
-        ${sqlLiteral(job.workspace_path)},
-        ${sqlLiteral(job.artifact_path)},
-        ${sqlLiteral(job.metadata_json)}
-      );
-    `);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      job.job_id,
+      job.caller,
+      job.profile,
+      job.status,
+      job.network,
+      job.created_at,
+      job.updated_at,
+      job.completed_at,
+      job.workspace_path,
+      job.artifact_path,
+      job.metadata_json,
+    );
   }
 
   listJobs(limit: number): JobRecord[] {
     const safeLimit = Math.min(Math.max(Math.trunc(limit), 1), 200);
-    return this.query<Record<string, unknown>>(`SELECT * FROM jobs ORDER BY created_at DESC LIMIT ${safeLimit};`).map(jobRecord);
+    return this.raw.prepare('SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?').all(safeLimit).map((row) => jobRecord(row as Record<string, unknown>));
   }
 
   getJob(jobId: string): JobRecord | undefined {
-    return this.query<Record<string, unknown>>(`SELECT * FROM jobs WHERE job_id = ${sqlLiteral(jobId)} LIMIT 1;`).map(jobRecord)[0];
+    const row = this.raw.prepare('SELECT * FROM jobs WHERE job_id = ? LIMIT 1').get(jobId) as Record<string, unknown> | undefined;
+    return row ? jobRecord(row) : undefined;
   }
 
   updateJobStatus(jobId: string, status: string, completed = false): void {
-    this.exec(`
+    const now = nowIso();
+    this.raw.prepare(`
       UPDATE jobs
-      SET status = ${sqlLiteral(status)},
-          updated_at = ${sqlLiteral(nowIso())},
-          completed_at = COALESCE(completed_at, ${sqlLiteral(completed ? nowIso() : null)})
-      WHERE job_id = ${sqlLiteral(jobId)};
-    `);
+      SET status = ?,
+          updated_at = ?,
+          completed_at = COALESCE(completed_at, ?)
+      WHERE job_id = ?
+    `).run(status, now, completed ? now : null, jobId);
   }
 
   insertPipelineRun(run: PipelineRunRecord): void {
-    this.exec(`
+    this.raw.prepare(`
       INSERT INTO pipeline_runs(run_id, job_id, status, exit_code, signal, duration_ms, created_at, completed_at, cwd, pipeline_json, stdout, stderr, truncated, error_json)
-      VALUES (
-        ${sqlLiteral(run.run_id)},
-        ${sqlLiteral(run.job_id)},
-        ${sqlLiteral(run.status)},
-        ${sqlLiteral(run.exit_code)},
-        ${sqlLiteral(run.signal)},
-        ${sqlLiteral(run.duration_ms)},
-        ${sqlLiteral(run.created_at)},
-        ${sqlLiteral(run.completed_at)},
-        ${sqlLiteral(run.cwd)},
-        ${sqlLiteral(run.pipeline_json)},
-        ${sqlLiteral(run.stdout)},
-        ${sqlLiteral(run.stderr)},
-        ${sqlLiteral(run.truncated)},
-        ${sqlLiteral(run.error_json)}
-      );
-    `);
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      run.run_id,
+      run.job_id,
+      run.status,
+      run.exit_code,
+      run.signal,
+      run.duration_ms,
+      run.created_at,
+      run.completed_at,
+      run.cwd,
+      run.pipeline_json,
+      run.stdout,
+      run.stderr,
+      run.truncated,
+      run.error_json,
+    );
   }
 
   listPipelineRuns(jobId: string): PipelineRunRecord[] {
-    return this.query<Record<string, unknown>>(`SELECT * FROM pipeline_runs WHERE job_id = ${sqlLiteral(jobId)} ORDER BY created_at DESC;`).map(pipelineRecord);
+    return this.raw.prepare('SELECT * FROM pipeline_runs WHERE job_id = ? ORDER BY created_at DESC').all(jobId).map((row) => pipelineRecord(row as Record<string, unknown>));
   }
 }

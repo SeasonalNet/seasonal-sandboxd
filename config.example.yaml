@@ -61,4 +61,6 @@ execution:
 
 auth:
   enabled: false
-  bearerTokens: []
+  defaultAccessTokenTtlSeconds: 900
+  maxAccessTokenTtlSeconds: 3600
+  idempotencyTtlSeconds: 86400

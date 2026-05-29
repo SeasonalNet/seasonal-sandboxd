@@ -7,8 +7,10 @@ It is designed for a no-network sandbox host or container. The daemon records jo
 ## Design summary
 
 - TypeScript/Node.js daemon.
-- Runtime avoids native npm modules; SQLite access uses the system `sqlite3` CLI.
+- SQLite access uses prepared statements through `better-sqlite3`, with a `node:sqlite` fallback for supported Node runtimes.
 - REST API with OpenAPI 3.1 contract.
+- Optional scoped opaque token exchange using `seasonalsandboxd_client_*` credentials and short-lived `seasonalsandboxd_access_*` tokens.
+- Mutating routes require `Idempotency-Key` and replay the original completed response for the same key/payload.
 - RFC 9457 Problem Details on errors.
 - SQLite metadata database, defaulting to `/var/lib/sandboxd/sandboxd.db`.
 - Job IDs use `sandboxd_<uuidv7>`.
@@ -40,6 +42,8 @@ It is designed for a no-network sandbox host or container. The daemon records jo
 GET  /healthz
 GET  /readyz
 GET  /openapi.json
+POST /v1/auth/token
+POST /v1/auth/revoke
 POST /v1/jobs
 GET  /v1/jobs
 GET  /v1/jobs/{jobId}
@@ -56,7 +60,9 @@ Create a job:
 ```bash
 curl -sS -X POST http://127.0.0.1:9090/v1/jobs \
   -H 'content-type: application/json' \
-  -d '{"caller":"seasonal-agent","profile":"repo-inspect"}' | jq .
+  -H 'authorization: Bearer <seasonalsandboxd_access_token>' \
+  -H 'idempotency-key: create-job-0001' \
+  -d '{"profile":"inspect"}' | jq .
 ```
 
 Run a pipeline:
@@ -64,13 +70,36 @@ Run a pipeline:
 ```bash
 curl -sS -X POST http://127.0.0.1:9090/v1/jobs/sandboxd_.../pipelines \
   -H 'content-type: application/json' \
+  -H 'authorization: Bearer <seasonalsandboxd_access_token>' \
+  -H 'idempotency-key: run-pipeline-0001' \
   -d '{"pipeline":[["find",".","-maxdepth","2","-type","f"],["sort"]]}' | jq .
+```
+
+## Token sketch
+
+Create a sandboxd client credential:
+
+```bash
+npm run token -- create-client \
+  --name seasonal-agent \
+  --scopes sandbox:status:read,sandbox:job:create,sandbox:job:read,sandbox:pipeline:run,sandbox:artifact:read,sandbox:job:cancel \
+  --prefix /v1/jobs \
+  --cidr 192.168.1.20/32
+```
+
+Exchange it for an access token:
+
+```bash
+curl -sS -X POST http://127.0.0.1:9090/v1/auth/token \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer <seasonalsandboxd_client_token>' \
+  -d '{"requestedScopes":["sandbox:job:create","sandbox:job:read","sandbox:pipeline:run","sandbox:artifact:read"]}' | jq .
 ```
 
 ## Install sketch
 
 ```bash
-# Requires upstream Node.js and Debian sqlite3. Do not install Debian npm on minimal hosts.
+# Requires upstream Node.js. Prefer an environment where better-sqlite3 can use a prebuild or compile cleanly.
 npm install
 npm run build
 
@@ -89,7 +118,7 @@ On Debian, install Node from the upstream tarball or another lightweight Node di
 ```text
 node
 npm, only for install/build
-sqlite3
+compiler/prebuild support for `better-sqlite3`, or a Node runtime with `node:sqlite`
 coreutils/findutils/grep/sed/etc. for allowed pipeline commands
 ```
 

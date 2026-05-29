@@ -10,6 +10,11 @@ import { createJobPaths } from './paths.js';
 import { problem, ProblemError, sendProblem } from './problem.js';
 import { runPipeline } from './pipeline.js';
 import { nowIso } from './time.js';
+import { registerAuthMiddleware } from './middleware/auth.js';
+import { registerIdempotencyMiddleware } from './middleware/idempotency.js';
+import { issueAccessToken, revokeAccessToken } from './auth/service-tokens.js';
+import { normalizeScopes } from './auth/scopes.js';
+import { policy } from './policy/route-policy.js';
 
 function publicJob(job: JobRecord): Record<string, unknown> {
   return {
@@ -28,14 +33,40 @@ function publicJob(job: JobRecord): Record<string, unknown> {
 }
 
 function requireJob(db: SandboxDatabase, jobId: string): JobRecord {
-  if (!isJobId(jobId)) {
-    throw problem(400, 'Invalid job id', 'jobId must use sandboxd_<uuidv7> format.');
-  }
+  if (!isJobId(jobId)) throw problem(400, 'Invalid job id', 'jobId must use sandboxd_<uuidv7> format.');
   const job = db.getJob(jobId);
-  if (!job) {
-    throw problem(404, 'Job not found', `No job exists with id '${jobId}'.`);
-  }
+  if (!job) throw problem(404, 'Job not found', `No job exists with id '${jobId}'.`);
   return job;
+}
+
+interface TokenRequestBody {
+  requestedScopes?: unknown;
+  requested_scopes?: unknown;
+  requestedPrefixes?: unknown;
+  requested_prefixes?: unknown;
+  ttlSeconds?: number;
+  ttl_seconds?: number;
+}
+
+function requestedScopes(body: TokenRequestBody): string[] {
+  return normalizeScopes(body.requestedScopes ?? body.requested_scopes ?? []);
+}
+
+function requestedPrefixes(body: TokenRequestBody): string[] {
+  const value = body.requestedPrefixes ?? body.requested_prefixes ?? [];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean);
+}
+
+function requestedTtl(body: TokenRequestBody, fallback: number): number {
+  const value = body.ttlSeconds ?? body.ttl_seconds;
+  return Number.isFinite(value) ? Number(value) : fallback;
+}
+
+function authHeaderToken(header: string | string[] | undefined): string | null {
+  const value = Array.isArray(header) ? header[0] : header;
+  if (!value) return null;
+  return /^Bearer\s+(.+)$/i.exec(value)?.[1]?.trim() ?? null;
 }
 
 export function buildServer(config: SandboxdConfig, db: SandboxDatabase): FastifyInstance {
@@ -50,19 +81,12 @@ export function buildServer(config: SandboxdConfig, db: SandboxDatabase): Fastif
     sendProblem(reply, new ProblemError({ status: 500, title: 'Internal Server Error', detail: 'The request failed unexpectedly.' }));
   });
 
-  app.addHook('preHandler', async (request) => {
-    if (!config.auth.enabled) return;
-    if (request.url === '/healthz') return;
-    const header = request.headers.authorization ?? '';
-    const token = header.toLowerCase().startsWith('bearer ') ? header.slice(7).trim() : '';
-    if (!token || !config.auth.bearerTokens.includes(token)) {
-      throw problem(401, 'Unauthorized', 'A valid bearer token is required.');
-    }
-  });
+  registerAuthMiddleware(app, db, config);
+  registerIdempotencyMiddleware(app, db, config);
 
-  app.get('/healthz', async () => ({ ok: true, service: 'seasonal-sandboxd' }));
+  app.get('/healthz', { config: policy({ exposure: 'public' }) }, async () => ({ ok: true, service: 'seasonal-sandboxd' }));
 
-  app.get('/readyz', async () => {
+  app.get('/readyz', { config: policy({ exposure: 'public' }) }, async () => {
     const dbReady = db.ready();
     const workspaceReady = fs.existsSync(config.storage.workspaceRoot);
     const artifactReady = fs.existsSync(config.storage.artifactRoot);
@@ -72,19 +96,54 @@ export function buildServer(config: SandboxdConfig, db: SandboxDatabase): Fastif
     return { ok: true, dbReady, workspaceReady, artifactReady };
   });
 
-  app.get('/openapi.json', async () => {
+  app.get('/openapi.json', { config: policy({ exposure: 'internal', authRequired: true, scopes: ['sandbox:status:read'] }) }, async () => {
     const openapiPath = path.resolve('openapi/openapi.yaml');
     const parsed = YAML.parse(fs.readFileSync(openapiPath, 'utf8')) as unknown;
     return parsed;
   });
 
-  app.post('/v1/jobs', async (request, reply) => {
-    const body = (request.body ?? {}) as Record<string, unknown>;
-    const caller = String(body.caller ?? '').trim() || 'unknown';
-    const profile = String(body.profile ?? config.execution.defaultProfile).trim();
-    if (!config.execution.profiles[profile]) {
-      throw problem(400, 'Unknown execution profile', `profile '${profile}' is not configured.`);
+  app.post('/v1/auth/token', {
+    config: policy({ exposure: 'auth', authRequired: true, authMode: 'client-credential' }),
+  }, async (request, reply) => {
+    const body = (request.body ?? {}) as TokenRequestBody;
+    try {
+      const issued = issueAccessToken(db, {
+        client: request.auth!,
+        requestedScopes: requestedScopes(body),
+        requestedPrefixes: requestedPrefixes(body),
+        ttlSeconds: requestedTtl(body, config.auth.defaultAccessTokenTtlSeconds),
+        maxTtlSeconds: config.auth.maxAccessTokenTtlSeconds,
+        sourceIp: request.ip,
+        userAgent: Array.isArray(request.headers['user-agent']) ? request.headers['user-agent'].join(' ') : request.headers['user-agent'],
+      });
+
+      return {
+        accessToken: issued.rawToken,
+        tokenType: 'Bearer',
+        expiresAt: issued.expiresAt,
+        expiresIn: Math.max(0, Math.floor((Date.parse(issued.expiresAt) - Date.now()) / 1000)),
+        scopes: issued.scopes,
+        allowedPrefixes: issued.allowedPrefixes,
+      };
+    } catch (error) {
+      throw problem(403, 'Token request denied', error instanceof Error ? error.message : 'Token request denied.', { code: 'token_request_denied' });
     }
+  });
+
+  app.post('/v1/auth/revoke', {
+    config: policy({ exposure: 'auth', authRequired: true, authMode: 'access-token' }),
+  }, async (request) => {
+    const token = authHeaderToken(request.headers.authorization);
+    return { revoked: token ? revokeAccessToken(db, token) : false };
+  });
+
+  app.post('/v1/jobs', {
+    config: policy({ exposure: 'internal', authRequired: true, scopes: ['sandbox:job:create'], idempotencyRequired: true }),
+  }, async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const caller = (request.auth?.actor ?? String(body.caller ?? '').trim()) || 'unknown';
+    const profile = String(body.profile ?? config.execution.defaultProfile).trim();
+    if (!config.execution.profiles[profile]) throw problem(400, 'Unknown execution profile', `profile '${profile}' is not configured.`);
     const metadata = typeof body.metadata === 'object' && body.metadata !== null ? body.metadata : {};
     const jobId = createJobId();
     const paths = createJobPaths(config.storage.workspaceRoot, config.storage.artifactRoot, jobId);
@@ -108,19 +167,25 @@ export function buildServer(config: SandboxdConfig, db: SandboxDatabase): Fastif
     return publicJob(job);
   });
 
-  app.get('/v1/jobs', async (request) => {
+  app.get('/v1/jobs', {
+    config: policy({ exposure: 'internal', authRequired: true, scopes: ['sandbox:job:read'] }),
+  }, async (request) => {
     const query = request.query as Record<string, unknown>;
     const limit = Math.min(Math.max(Number(query.limit ?? 50), 1), 200);
     return { items: db.listJobs(limit).map(publicJob) };
   });
 
-  app.get('/v1/jobs/:jobId', async (request) => {
+  app.get('/v1/jobs/:jobId', {
+    config: policy({ exposure: 'internal', authRequired: true, scopes: ['sandbox:job:read'] }),
+  }, async (request) => {
     const { jobId } = request.params as { jobId: string };
     const job = requireJob(db, jobId);
     return publicJob(job);
   });
 
-  app.post('/v1/jobs/:jobId/pipelines', async (request) => {
+  app.post('/v1/jobs/:jobId/pipelines', {
+    config: policy({ exposure: 'internal', authRequired: true, scopes: ['sandbox:pipeline:run'], idempotencyRequired: true }),
+  }, async (request) => {
     const { jobId } = request.params as { jobId: string };
     const job = requireJob(db, jobId);
     const result = await runPipeline({
@@ -147,20 +212,26 @@ export function buildServer(config: SandboxdConfig, db: SandboxDatabase): Fastif
     };
   });
 
-  app.get('/v1/jobs/:jobId/processes', async (request) => {
+  app.get('/v1/jobs/:jobId/processes', {
+    config: policy({ exposure: 'internal', authRequired: true, scopes: ['sandbox:job:read'] }),
+  }, async (request) => {
     const { jobId } = request.params as { jobId: string };
     requireJob(db, jobId);
     return { jobId, items: [] };
   });
 
-  app.post('/v1/jobs/:jobId/cancel', async (request) => {
+  app.post('/v1/jobs/:jobId/cancel', {
+    config: policy({ exposure: 'internal', authRequired: true, scopes: ['sandbox:job:cancel'], idempotencyRequired: true }),
+  }, async (request) => {
     const { jobId } = request.params as { jobId: string };
     requireJob(db, jobId);
     db.updateJobStatus(jobId, 'cancel_requested', false);
     return { jobId, status: 'cancel_requested' };
   });
 
-  app.get('/v1/jobs/:jobId/artifacts', async (request) => {
+  app.get('/v1/jobs/:jobId/artifacts', {
+    config: policy({ exposure: 'internal', authRequired: true, scopes: ['sandbox:artifact:read'] }),
+  }, async (request) => {
     const { jobId } = request.params as { jobId: string };
     const job = requireJob(db, jobId);
     const files = fs.existsSync(job.artifact_path)

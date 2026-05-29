@@ -15,7 +15,7 @@ The daemon provides a narrow REST API for creating job-scoped scratch workspaces
 - Keep the API RESTful and documented in OpenAPI.
 - Return RFC 9457 Problem Details for errors.
 - Keep SQLite as the default storage layer unless there is explicit future design work for another backend.
-- Do not add native npm SQLite modules by default; the current daemon uses the system `sqlite3` CLI to keep minimal hosts lightweight.
+- Native SQLite modules are acceptable when they materially simplify correctness or safety. Prefer `better-sqlite3` for prepared-statement SQLite access, with `node:sqlite` acceptable as a fallback on supported Node runtimes.
 - Prefer structured argv arrays and pipeline stages over string commands.
 - Do not add network-capable commands to the default allowlist.
 - Keep generated artifacts under the configured artifact root, partitioned by year and month.
@@ -55,5 +55,7 @@ The daemon provides a narrow REST API for creating job-scoped scratch workspaces
 ## Change discipline
 
 - Update `openapi/openapi.yaml` when changing API behavior.
+- Mutating routes must require and honor `Idempotency-Key`; do not add mutating endpoints without route policy coverage.
+- Authenticated routes should use scoped sandboxd access tokens issued from sandboxd client credentials, not raw static all-access bearer tokens.
 - Add or update tests for path partitioning, job IDs, command allowlists, and Problem Details.
 - Keep README operator-facing and AGENTS.md agent-facing.
