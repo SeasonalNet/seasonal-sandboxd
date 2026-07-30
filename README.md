@@ -80,7 +80,7 @@ curl -sS -X POST http://127.0.0.1:9090/v1/jobs/sandboxd_.../pipelines \
 Create a sandboxd client credential:
 
 ```bash
-npm run token -- create-client \
+pnpm token -- create-client \
   --name seasonal-agent \
   --scopes sandbox:status:read,sandbox:job:create,sandbox:job:read,sandbox:pipeline:run,sandbox:artifact:read,sandbox:job:cancel \
   --prefix /v1/jobs \
@@ -100,8 +100,8 @@ curl -sS -X POST http://127.0.0.1:9090/v1/auth/token \
 
 ```bash
 # Requires upstream Node.js. Prefer an environment where better-sqlite3 can use a prebuild or compile cleanly.
-npm install
-npm run build
+pnpm install --frozen-lockfile
+pnpm build
 
 sudo install -d -m 0755 /etc/seasonal-sandboxd
 sudo install -d -m 0750 -o sandboxd -g sandboxd /var/lib/sandboxd

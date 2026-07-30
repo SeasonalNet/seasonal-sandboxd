@@ -27,7 +27,7 @@ function usage(): never {
   seasonal-sandboxd token create-client --name NAME --scopes scope1,scope2 [--prefix /v1/jobs] [--cidr 192.168.1.0/24] [--expires-at ISO]
 
 Examples:
-  npm run token -- create-client --name seasonal-agent --scopes sandbox:status:read,sandbox:job:create,sandbox:job:read,sandbox:pipeline:run,sandbox:artifact:read,sandbox:job:cancel --prefix /v1/jobs --cidr 192.168.1.20/32
+  pnpm token -- create-client --name seasonal-agent --scopes sandbox:status:read,sandbox:job:create,sandbox:job:read,sandbox:pipeline:run,sandbox:artifact:read,sandbox:job:cancel --prefix /v1/jobs --cidr 192.168.1.20/32
 `);
   process.exit(2);
 }
