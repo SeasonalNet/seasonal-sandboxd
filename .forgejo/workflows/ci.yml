@@ -7,7 +7,7 @@ on:
 
 jobs:
   node:
-    runs-on: node24
+    runs-on: [node24, normal, general]
 
     steps:
       - name: Check out repository
