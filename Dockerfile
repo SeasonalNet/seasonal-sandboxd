@@ -1,12 +1,13 @@
 # syntax=docker/dockerfile:1
 
-FROM node:24-bookworm-slim AS build
+FROM node:26-bookworm-slim AS build
 
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
-RUN corepack enable \
+RUN npm install --global pnpm@12.21.0 \
+    && test "$(pnpm --version)" = "12.21.0" \
     && pnpm install --frozen-lockfile --no-optional
 
 COPY tsconfig.json ./
@@ -16,16 +17,17 @@ COPY migrations ./migrations
 
 RUN pnpm build
 
-FROM node:24-bookworm-slim AS production-dependencies
+FROM node:26-bookworm-slim AS production-dependencies
 
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
-RUN corepack enable \
+RUN npm install --global pnpm@12.21.0 \
+    && test "$(pnpm --version)" = "12.21.0" \
     && pnpm install --prod --frozen-lockfile --no-optional
 
-FROM node:24-bookworm-slim
+FROM node:26-bookworm-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
